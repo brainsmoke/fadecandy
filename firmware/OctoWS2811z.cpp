@@ -35,16 +35,28 @@ uint8_t OctoWS2811z::params;
 
 
 static const uint16_t ones_zeroes = 0x00FF;
+static uint8_t clockMask;
 static volatile uint8_t update_in_progress = 0;
 static uint32_t update_completed_at = 0;
+static uint32_t latch_time = 0;
 
 
 OctoWS2811z::OctoWS2811z(uint32_t numPerStrip, void *buffer, uint8_t config)
 {
     stripLen = numPerStrip;
     frameBuffer = buffer;
-    drawBuffer = (24 * numPerStrip) + (uint8_t*) buffer;
+    drawBuffer = (24 * numPerStrip + 4) + (uint8_t*) buffer;
     params = config;
+    clockMask = 0;
+    if (config & (WS2801_1MHz|WS2801_2MHz)) {
+        latch_time = 1000;
+        if (config & WS2801_1X_CLOCK)
+            clockMask = 0x80;
+        else
+            clockMask = 0xf0;
+    }
+    else
+        latch_time = 50;
 }
 
 // Waveform timing: these set the high time for a 0 and 1 bit, as a fraction of
@@ -67,7 +79,6 @@ OctoWS2811z::OctoWS2811z(uint32_t numPerStrip, void *buffer, uint8_t config)
 
 static void initWS2811DMA(uint32_t bufsize, uint32_t frequency)
 {
-
     // create the two waveforms for WS2811 low and high bits
     analogWriteFrequency(3, frequency);
     analogWriteFrequency(4, frequency);
@@ -87,7 +98,7 @@ static void initWS2811DMA(uint32_t bufsize, uint32_t frequency)
     DMA_CR = 0;
     DMA_ERQ = 0;
 
-    // DMA channel #1 sets WS2811 high at the beginning of each cycle
+    // DMA channel #1 sets WS2811 high at the beginning of each cycle and low at 80%
     DMA_TCD1_SADDR = &ones_zeroes;
     DMA_TCD1_SOFF = 1;
     DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(0) | DMA_TCD_ATTR_SMOD(1) | DMA_TCD_ATTR_DSIZE(0);
@@ -112,7 +123,7 @@ static void initWS2811DMA(uint32_t bufsize, uint32_t frequency)
     DMA_TCD2_CSR = DMA_TCD_CSR_DREQ;
     DMA_TCD2_BITER_ELINKNO = bufsize;
 
-    // route the edge detect interrupts to trigger the 3 channels
+    // route the edge detect interrupts to trigger the 2 channels
     DMAMUX0_CHCFG1 = 0;
     DMAMUX0_CHCFG1 = DMAMUX_SOURCE_PORTA | DMAMUX_ENABLE;
     DMAMUX0_CHCFG2 = 0;
@@ -123,9 +134,76 @@ static void initWS2811DMA(uint32_t bufsize, uint32_t frequency)
     //pinMode(1, OUTPUT); // testing: oscilloscope trigger
 }
 
+#define WS2801_TIMING_CLOCK 128
+
+static void initWS2801DMA(uint32_t bufsize, uint32_t frequency)
+{
+    // create the two waveforms
+    analogWriteFrequency(3, frequency);
+    analogWriteFrequency(4, frequency);
+    analogWrite(3, WS2801_TIMING_CLOCK);
+    analogWrite(4, WS2801_TIMING_CLOCK);
+
+    // pin 16 triggers DMA(port B) on raising edge (configure for pin 3's waveform)
+    CORE_PIN16_CONFIG = PORT_PCR_IRQC(1)|PORT_PCR_MUX(3);
+    pinMode(3, INPUT_PULLUP); // pin 3 no longer needed
+
+    // pin 4 triggers DMA(port A) on falling edge of high duty waveform
+    CORE_PIN4_CONFIG = PORT_PCR_IRQC(2)|PORT_PCR_MUX(3);
+
+    // enable clocks to the DMA controller and DMAMUX
+    SIM_SCGC7 |= SIM_SCGC7_DMA;
+    SIM_SCGC6 |= SIM_SCGC6_DMAMUX;
+    DMA_CR = 0;
+    DMA_ERQ = 0;
+
+    // DMA channel #1 raises the clock at 50% waveform
+    DMA_TCD1_SADDR = &clockMask;
+    DMA_TCD1_SOFF = 0;
+    DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(0) | DMA_TCD_ATTR_DSIZE(0);
+    DMA_TCD1_NBYTES_MLNO = 1;
+    DMA_TCD1_SLAST = 0;
+    DMA_TCD1_DADDR = &GPIOD_PSOR;
+    DMA_TCD1_DOFF = 0;
+    DMA_TCD1_CITER_ELINKNO = bufsize;
+    DMA_TCD1_DLASTSGA = 0;
+    DMA_TCD1_CSR = DMA_TCD_CSR_DREQ;
+    DMA_TCD1_BITER_ELINKNO = bufsize;
+
+    // DMA channel #2 writes the pixel data at 20% of the cycle
+    DMA_TCD2_SOFF = 1;
+    DMA_TCD2_ATTR = DMA_TCD_ATTR_SSIZE(0) | DMA_TCD_ATTR_DSIZE(0);
+    DMA_TCD2_NBYTES_MLNO = 1;
+    DMA_TCD2_SLAST = -bufsize-1;
+    DMA_TCD2_DADDR = &GPIOD_PDOR;
+    DMA_TCD2_DOFF = 0;
+    DMA_TCD2_CITER_ELINKNO = bufsize+1;
+    DMA_TCD2_DLASTSGA = 0;
+    DMA_TCD2_CSR = DMA_TCD_CSR_DREQ | DMA_TCD_CSR_INTMAJOR;
+    DMA_TCD2_BITER_ELINKNO = bufsize+1;
+
+    // route the edge detect interrupts to trigger the 2 channels
+    DMAMUX0_CHCFG1 = 0;
+    DMAMUX0_CHCFG1 = DMAMUX_SOURCE_PORTA | DMAMUX_ENABLE;
+    DMAMUX0_CHCFG2 = 0;
+    DMAMUX0_CHCFG2 = DMAMUX_SOURCE_PORTB | DMAMUX_ENABLE;
+
+    // enable a done interrupts when channel #1 completes
+    NVIC_ENABLE_IRQ(IRQ_DMA_CH2);
+    //pinMode(1, OUTPUT); // testing: oscilloscope trigger
+}
+
+
 void dma_ch1_isr(void)
 {
     DMA_CINT = 1;
+    update_completed_at = micros();
+    update_in_progress = 0;
+}
+
+void dma_ch2_isr(void)
+{
+    DMA_CINT = 2;
     update_completed_at = micros();
     update_in_progress = 0;
 }
@@ -153,23 +231,39 @@ void OctoWS2811z::begin(void)
     pinMode(21, OUTPUT);    // strip #7
     pinMode(5, OUTPUT); // strip #8
 
-    frequency = (params & WS2811_400kHz) ? 400000 : 800000;
+    if (params & (WS2801_1MHz|WS2801_2MHz)) {
+		// for WS2801, reset the clock lines at the end of the DMA transfer
+	    ((uint8_t*)frameBuffer)[bufsize] = 0xFF ^ clockMask;
+	    ((uint8_t*)drawBuffer)[bufsize] = 0xFF ^ clockMask;
 
-	initWS2811DMA(bufsize, frequency);
+        frequency = (params & WS2801_1MHz) ? 1000000 : 2000000;
+        initWS2801DMA(bufsize, frequency);
+    } else {
+        frequency = (params & WS2811_400kHz) ? 400000 : 800000;
+        initWS2811DMA(bufsize, frequency);
+    }
 }
 
 int OctoWS2811z::busy(void)
 {
     //if (DMA_ERQ & 0x6) return 1;
     if (update_in_progress) return 1;
-    // busy for 50 us after the done interrupt, for WS2811 reset
-    if (micros() - update_completed_at < 50) return 1;
+    // busy for 50 us after the done interrupt, for WS2811 reset, 1000us for WS2801
+    if (micros() - update_completed_at < latch_time) return 1;
     return 0;
 }
 
 void OctoWS2811z::show(void)
 {
     uint32_t cv, sc;
+
+    uint32_t bufsize;
+    bufsize = stripLen*24;
+
+    // Clear the clock lines for WS2801
+    if (params & (WS2801_1MHz|WS2801_2MHz))
+        for (unsigned i = 0; i < bufsize; i++)
+            ((uint8_t*)drawBuffer)[i] &=~clockMask;
 
     // wait for any prior DMA operation
     while (update_in_progress) ; 
@@ -178,8 +272,8 @@ void OctoWS2811z::show(void)
     std::swap(frameBuffer, drawBuffer);
     DMA_TCD2_SADDR = frameBuffer;
 
-    // wait for WS2811 reset
-    while (micros() - update_completed_at < 50) ;
+    // wait for WS2811/WS2801 reset
+    while (micros() - update_completed_at < latch_time) ;
 
     // ok to start, but we must be very careful to begin
     // without any prior 3 x 800kHz DMA requests pending

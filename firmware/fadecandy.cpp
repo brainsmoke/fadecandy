@@ -34,8 +34,11 @@ static fcBuffers buffers;
 fcLinearLUT fcBuffers::lutCurrent;
 
 // Double-buffered DMA memory for raw bit planes of output
-static DMAMEM int ledBuffer[LEDS_PER_STRIP * 12];
+// reserve some extra space for final falling clock line signal on WS2801
+
+static DMAMEM int ledBuffer[DMA_BUFFER_SIZE(LEDS_PER_STRIP)/sizeof(int)];
 static OctoWS2811z leds(LEDS_PER_STRIP, ledBuffer, WS2811_800kHz);
+//static OctoWS2811z leds(LEDS_PER_STRIP, ledBuffer, WS2801_1MHz);
 
 /*
  * Residuals for temporal dithering. Usually 8 bits is enough, but

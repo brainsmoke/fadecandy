@@ -28,11 +28,16 @@
 
 #define WS2811_800kHz 0x00  // Nearly all WS2811 are 800 kHz
 #define WS2811_400kHz 0x10  // Adafruit's Flora Pixels
+#define WS2801_1MHz   0x20
+#define WS2801_2MHz   0x40  // Still needs tweaking :-/
 
+#define WS2801_1X_CLOCK 0x01 // Reserve only strip 7 for a clock line (instead of strips 4-7)
+
+#define DMA_BUFFER_SIZE(numPerStrip) ( (numPerStrip) * 48 + 8)
 
 class OctoWS2811z {
 public:
-    // Buffers: 48 bytes * numPerStrip
+    // Buffers: 48 bytes * numPerStrip + 8 bytes
     OctoWS2811z(uint32_t numPerStrip, void *buffer, uint8_t config = 0);
     void begin(void);
 
