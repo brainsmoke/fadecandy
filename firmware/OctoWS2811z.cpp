@@ -65,32 +65,10 @@ OctoWS2811z::OctoWS2811z(uint32_t numPerStrip, void *buffer, uint8_t config)
 #define WS2811_TIMING_T0H  60
 #define WS2811_TIMING_T1H  176
 
-
-void OctoWS2811z::begin(void)
+static void initWS2811DMA(uint32_t bufsize, uint32_t frequency)
 {
-    uint32_t bufsize, frequency;
-
-    bufsize = stripLen*24;
-
-    // Clear both front and back buffers
-    for (unsigned i = 0; i < bufsize; i++) {
-        ((uint8_t*)frameBuffer)[i] = 0;
-        ((uint8_t*)drawBuffer)[i] = 0;
-    }
-    
-    // configure the 8 output pins
-    GPIOD_PCOR = 0xFF;
-    pinMode(2, OUTPUT); // strip #1
-    pinMode(14, OUTPUT);    // strip #2
-    pinMode(7, OUTPUT); // strip #3
-    pinMode(8, OUTPUT); // strip #4
-    pinMode(6, OUTPUT); // strip #5
-    pinMode(20, OUTPUT);    // strip #6
-    pinMode(21, OUTPUT);    // strip #7
-    pinMode(5, OUTPUT); // strip #8
 
     // create the two waveforms for WS2811 low and high bits
-    frequency = (params & WS2811_400kHz) ? 400000 : 800000;
     analogWriteFrequency(3, frequency);
     analogWriteFrequency(4, frequency);
     analogWrite(3, WS2811_TIMING_T0H);
@@ -150,6 +128,34 @@ void dma_ch1_isr(void)
     DMA_CINT = 1;
     update_completed_at = micros();
     update_in_progress = 0;
+}
+
+void OctoWS2811z::begin(void)
+{
+    uint32_t bufsize, frequency;
+
+    bufsize = stripLen*24;
+
+    // Clear both front and back buffers
+    for (unsigned i = 0; i < bufsize; i++) {
+        ((uint8_t*)frameBuffer)[i] = 0;
+        ((uint8_t*)drawBuffer)[i] = 0;
+    }
+
+    // configure the 8 output pins
+    GPIOD_PCOR = 0xFF;
+    pinMode(2, OUTPUT); // strip #1
+    pinMode(14, OUTPUT);    // strip #2
+    pinMode(7, OUTPUT); // strip #3
+    pinMode(8, OUTPUT); // strip #4
+    pinMode(6, OUTPUT); // strip #5
+    pinMode(20, OUTPUT);    // strip #6
+    pinMode(21, OUTPUT);    // strip #7
+    pinMode(5, OUTPUT); // strip #8
+
+    frequency = (params & WS2811_400kHz) ? 400000 : 800000;
+
+	initWS2811DMA(bufsize, frequency);
 }
 
 int OctoWS2811z::busy(void)
