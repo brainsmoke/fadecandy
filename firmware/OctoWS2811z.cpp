@@ -34,7 +34,7 @@ void * OctoWS2811z::drawBuffer;
 uint8_t OctoWS2811z::params;
 
 
-static const uint8_t ones = 0xFF;
+static const uint16_t ones_zeroes = 0x00FF;
 static volatile uint8_t update_in_progress = 0;
 static uint32_t update_completed_at = 0;
 
@@ -96,17 +96,12 @@ void OctoWS2811z::begin(void)
     analogWrite(3, WS2811_TIMING_T0H);
     analogWrite(4, WS2811_TIMING_T1H);
 
-    // pin 16 triggers DMA(port B) on rising edge (configure for pin 3's waveform)
-    CORE_PIN16_CONFIG = PORT_PCR_IRQC(1)|PORT_PCR_MUX(3);
+    // pin 16 triggers DMA(port B) on falling edge (configure for pin 3's waveform)
+    CORE_PIN16_CONFIG = PORT_PCR_IRQC(2)|PORT_PCR_MUX(3);
     pinMode(3, INPUT_PULLUP); // pin 3 no longer needed
 
-    // pin 15 triggers DMA(port C) on falling edge of low duty waveform
-    // pin 15 and 16 must be connected by the user: 16 is output, 15 is input
-    pinMode(15, INPUT);
-    CORE_PIN15_CONFIG = PORT_PCR_IRQC(2)|PORT_PCR_MUX(1);
-
-    // pin 4 triggers DMA(port A) on falling edge of high duty waveform
-    CORE_PIN4_CONFIG = PORT_PCR_IRQC(2)|PORT_PCR_MUX(3);
+    // pin 4 triggers DMA(port A) on both edges of high duty waveform
+    CORE_PIN4_CONFIG = PORT_PCR_IRQC(3)|PORT_PCR_MUX(3);
 
     // enable clocks to the DMA controller and DMAMUX
     SIM_SCGC7 |= SIM_SCGC7_DMA;
@@ -115,17 +110,17 @@ void OctoWS2811z::begin(void)
     DMA_ERQ = 0;
 
     // DMA channel #1 sets WS2811 high at the beginning of each cycle
-    DMA_TCD1_SADDR = &ones;
-    DMA_TCD1_SOFF = 0;
-    DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(0) | DMA_TCD_ATTR_DSIZE(0);
+    DMA_TCD1_SADDR = &ones_zeroes;
+    DMA_TCD1_SOFF = 1;
+    DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(0) | DMA_TCD_ATTR_SMOD(1) | DMA_TCD_ATTR_DSIZE(0);
     DMA_TCD1_NBYTES_MLNO = 1;
     DMA_TCD1_SLAST = 0;
-    DMA_TCD1_DADDR = &GPIOD_PSOR;
+    DMA_TCD1_DADDR = &GPIOD_PDOR;
     DMA_TCD1_DOFF = 0;
-    DMA_TCD1_CITER_ELINKNO = bufsize;
+    DMA_TCD1_CITER_ELINKNO = bufsize*2;
     DMA_TCD1_DLASTSGA = 0;
-    DMA_TCD1_CSR = DMA_TCD_CSR_DREQ;
-    DMA_TCD1_BITER_ELINKNO = bufsize;
+    DMA_TCD1_CSR = DMA_TCD_CSR_DREQ | DMA_TCD_CSR_INTMAJOR;
+    DMA_TCD1_BITER_ELINKNO = bufsize*2;
 
     // DMA channel #2 writes the pixel data at 20% of the cycle
     DMA_TCD2_SOFF = 1;
@@ -139,42 +134,27 @@ void OctoWS2811z::begin(void)
     DMA_TCD2_CSR = DMA_TCD_CSR_DREQ;
     DMA_TCD2_BITER_ELINKNO = bufsize;
 
-    // DMA channel #3 clear all the pins low at 48% of the cycle
-    DMA_TCD3_SADDR = &ones;
-    DMA_TCD3_SOFF = 0;
-    DMA_TCD3_ATTR = DMA_TCD_ATTR_SSIZE(0) | DMA_TCD_ATTR_DSIZE(0);
-    DMA_TCD3_NBYTES_MLNO = 1;
-    DMA_TCD3_SLAST = 0;
-    DMA_TCD3_DADDR = &GPIOD_PCOR;
-    DMA_TCD3_DOFF = 0;
-    DMA_TCD3_CITER_ELINKNO = bufsize;
-    DMA_TCD3_DLASTSGA = 0;
-    DMA_TCD3_CSR = DMA_TCD_CSR_DREQ | DMA_TCD_CSR_INTMAJOR;
-    DMA_TCD3_BITER_ELINKNO = bufsize;
-
     // route the edge detect interrupts to trigger the 3 channels
     DMAMUX0_CHCFG1 = 0;
-    DMAMUX0_CHCFG1 = DMAMUX_SOURCE_PORTB | DMAMUX_ENABLE;
+    DMAMUX0_CHCFG1 = DMAMUX_SOURCE_PORTA | DMAMUX_ENABLE;
     DMAMUX0_CHCFG2 = 0;
-    DMAMUX0_CHCFG2 = DMAMUX_SOURCE_PORTC | DMAMUX_ENABLE;
-    DMAMUX0_CHCFG3 = 0;
-    DMAMUX0_CHCFG3 = DMAMUX_SOURCE_PORTA | DMAMUX_ENABLE;
+    DMAMUX0_CHCFG2 = DMAMUX_SOURCE_PORTB | DMAMUX_ENABLE;
 
-    // enable a done interrupts when channel #3 completes
-    NVIC_ENABLE_IRQ(IRQ_DMA_CH3);
+    // enable a done interrupts when channel #1 completes
+    NVIC_ENABLE_IRQ(IRQ_DMA_CH1);
     //pinMode(1, OUTPUT); // testing: oscilloscope trigger
 }
 
-void dma_ch3_isr(void)
+void dma_ch1_isr(void)
 {
-    DMA_CINT = 3;
+    DMA_CINT = 1;
     update_completed_at = micros();
     update_in_progress = 0;
 }
 
 int OctoWS2811z::busy(void)
 {
-    //if (DMA_ERQ & 0xE) return 1;
+    //if (DMA_ERQ & 0x6) return 1;
     if (update_in_progress) return 1;
     // busy for 50 us after the done interrupt, for WS2811 reset
     if (micros() - update_completed_at < 50) return 1;
@@ -216,9 +196,8 @@ void OctoWS2811z::show(void)
     FTM1_SC = sc & 0xE7;    // stop FTM1 timer (hopefully before it rolls over)
     //digitalWriteFast(1, HIGH); // oscilloscope trigger
     PORTB_ISFR = (1<<0);    // clear any prior rising edge
-    PORTC_ISFR = (1<<0);    // clear any prior low duty falling edge
-    PORTA_ISFR = (1<<13);   // clear any prior high duty falling edge
-    DMA_ERQ = 0x0E;     // enable all 3 DMA channels
+    PORTA_ISFR = (1<<13);   // clear any prior edge
+    DMA_ERQ = 0x06;     // enable all 2 DMA channels
     FTM1_SC = sc;       // restart FTM1 timer
     //digitalWriteFast(1, LOW);
     interrupts();
